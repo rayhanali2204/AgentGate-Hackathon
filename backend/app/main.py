@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
+from .api.simulation_routes import router as simulation_router
 from .events import InMemorySecurityEventStore, SecurityEventStore
 
 
@@ -21,6 +22,7 @@ def create_app(event_store: SecurityEventStore | None = None) -> FastAPI:
         allow_headers=["Content-Type"],
     )
     application.include_router(router)
+    application.include_router(simulation_router)
     return application
 
 

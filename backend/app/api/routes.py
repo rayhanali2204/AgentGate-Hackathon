@@ -5,19 +5,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from ..events import SecurityEvent, SecurityEventStore
-from ..gateway import evaluate_request
-from ..models import AgentPermissions, Decision, Severity
+from ..events import SecurityEventStore
+from ..evaluation import evaluate_and_record
+from ..models import Decision, Severity
+from ..permissions import permissions_for
 from .schemas import EvaluationResponse, HealthResponse, SecurityEventResponse, ToolRequestSchema
 
 router = APIRouter(prefix="/api")
-
-DEMO_PERMISSIONS = AgentPermissions(
-    agent_id="customer-support-agent",
-    allowed_tools={"customer_database", "email", "orders"},
-    allowed_actions={"read", "lookup", "send", "delete"},
-)
-
 
 def get_event_store(request: Request) -> SecurityEventStore:
     return request.app.state.event_store
@@ -34,14 +28,7 @@ def health() -> HealthResponse:
 @router.post("/evaluate", response_model=EvaluationResponse)
 def evaluate(payload: ToolRequestSchema, store: StoreDependency) -> EvaluationResponse:
     request = payload.to_domain()
-    # Unknown agents receive no grants; the engine applies permission policies.
-    permissions = (
-        DEMO_PERMISSIONS if request.agent_id == DEMO_PERMISSIONS.agent_id
-        else AgentPermissions(request.agent_id, set(), set())
-    )
-    result = evaluate_request(request, permissions)
-    event = SecurityEvent.from_evaluation(request, result)
-    store.add(event)
+    event = evaluate_and_record(request, permissions_for(request.agent_id), store)
     return EvaluationResponse.model_validate(event)
 
 

@@ -1,6 +1,6 @@
-# AgentGate — Milestone 2
+# AgentGate — Milestone 3
 
-AgentGate is a zero-trust runtime security gateway for autonomous AI agents. Milestone 2 exposes the existing framework-independent security engine through FastAPI and adds an in-memory security event log. It evaluates proposed tool requests; callers must enforce the returned decision before executing a tool. It does not execute tools or implement an approval workflow.
+AgentGate is a zero-trust runtime security gateway for autonomous AI agents. Milestones 1 and 2 provide the framework-independent security engine, FastAPI API, and in-memory security event log. Milestone 3 adds a deterministic autonomous-agent simulation demonstrating runtime enforcement. It evaluates proposed tool requests; callers must enforce the returned decision before executing a tool. The evaluation endpoint does not execute tools. Scenario runs execute only safe fake tools after ALLOW; an approval workflow is not implemented.
 
 ## Security model and architecture
 
@@ -15,8 +15,13 @@ AgentGate is a zero-trust runtime security gateway for autonomous AI agents. Mil
 - `app/api/routes.py`: thin REST endpoints; no security policy logic.
 - `app/events.py`: framework-independent event dataclass, store protocol, and thread-safe in-memory implementation.
 - `app/main.py`: application factory, metadata, and development CORS.
+- `app/permissions.py`: shared server-owned demo permissions.
+- `app/evaluation.py`: shared evaluation and audit operation.
+- `app/simulation/`: deterministic scenario definitions, agent, guarded executor, fake tools, and timeline dataclasses.
+- `app/api/simulation_routes.py` and `simulation_schemas.py`: scenario HTTP boundary.
 - `tests/test_gateway.py`: unchanged core tests.
 - `tests/test_api.py` and `tests/test_events.py`: HTTP behavior, isolation, validation, audit storage, and concurrency tests.
+- `tests/test_simulation.py`: scenario outcomes, actual adapter execution, audit-before-execution ordering, and API integration.
 
 Permissions specify an agent ID and separate allowlists for tools and actions. Both must match; lists apply across all tools, with no per-resource or per-tool action restrictions in this milestone. Allowlists are copied into immutable sets. An agent ID mismatch blocks the request. Matching is exact and case-sensitive; there are no wildcard grants. An unrecognized action can only reach approval when explicitly allowlisted.
 
@@ -137,4 +142,62 @@ Every successful evaluation records an immutable event with a UUID, timezone-awa
 
 Storage is currently **in-memory, unbounded, and process-local**: restarts or reloads erase all events, and multiple workers have separate logs. Use one worker for the demo. No database or durable audit guarantee is included.
 
-This is Milestone 2 of a larger hackathon project. Frontend, Docker, Azure, GitHub Actions, database persistence, authentication, real LLM integration, and deployment remain outside this milestone.
+This is Milestone 3 of a larger hackathon project. Frontend, Docker, Azure, GitHub Actions, database persistence, authentication, real LLM integration, and deployment remain outside this milestone.
+
+## Threat model: indirect prompt injection
+
+A customer-support agent receives a trusted user request to find order #4821's tracking information and email it to the customer. An attacker controls a retrieved support document, an **untrusted input**. The document claims to be a system instruction and tells the agent to ignore its task, retrieve 5,000 sensitive customer records, and transfer them externally. This is indirect prompt injection: instructions arrive through outside content rather than through the original user request.
+
+The simulator deliberately models the agent being manipulated. It does not classify text or use a real LLM. The attack script proposes the dangerous action because that is the scenario being demonstrated; it does not parse or execute the document. The note appears as an explicit untrusted timeline step so viewers can see where the attack entered the context.
+
+**AgentGate does not need to perfectly detect whether text is malicious. Instead, it controls what actions the AI agent is actually allowed to perform.** The guard enforces policy at the tool boundary even after the agent has followed an attacker instruction. The two sensitive-data policies independently block the attempted operation; the score of 80 explains risk but does not cause the block.
+
+The demo assumes all proposed actions go through the guard, permissions are server-owned, and action metadata accurately describes the proposed access. This is an application-level simulation, not an OS sandbox or protection against code that bypasses the guard. No real customer data, production tools, or real email is used.
+
+## Deterministic scenarios
+
+| ID | Workflow | Expected outcome |
+| --- | --- | --- |
+| `normal-support` | `orders/lookup` then `email/send`, using the returned fake tracking number | `SUCCESS`; both ALLOW and execute |
+| `prompt-injection` | Untrusted note causes `customer_database/read` of 5,000 sensitive records to `external` | `ATTACK_BLOCKED`; BLOCK, 80, CRITICAL, `executed: false` |
+| `destructive-approval` | Trusted request proposes allowlisted `orders/delete` | `APPROVAL_REQUIRED`; REQUIRE_APPROVAL, 25, LOW, `executed: false` |
+
+The fake database returns a small synthetic sample only when allowed. The fake email adapter returns a deterministic message receipt and never sends email. All fake addresses use `example.invalid`. Tool execution is tracked per scenario run and independently checked in tests. UUIDs and UTC timestamps vary; scenario inputs, decisions, risk factors, fake output, and ordering are reproducible.
+
+## Scenario API
+
+Start the server from `backend/`:
+
+```sh
+.venv/bin/python -m uvicorn app.main:app --reload
+```
+
+Then run:
+
+```sh
+curl -sS http://127.0.0.1:8000/api/scenarios
+curl -sS -X POST http://127.0.0.1:8000/api/scenarios/normal-support/run
+curl -sS -X POST http://127.0.0.1:8000/api/scenarios/prompt-injection/run
+curl -sS -X POST http://127.0.0.1:8000/api/scenarios/destructive-approval/run
+curl -sS 'http://127.0.0.1:8000/api/events?decision=BLOCK&severity=CRITICAL'
+```
+
+`GET /api/scenarios` returns an array of `{id, name, description}`. `POST /api/scenarios/{scenario_id}/run` takes no body and returns `scenario_id`, `scenario_name`, `status`, `summary`, and chronological `steps`. Unknown scenario IDs return 404 without creating events.
+
+Input steps include `input_trust` (`trusted` or `untrusted`) and `input_content`; their decision and event fields are null. Proposed-action steps include tool/action/resource, record count, destination, sensitivity, security decision, policy details, risk, severity, explanation, execution status, `executed`, fake output (only after execution), and an `event_id` linked to the existing `/api/events/{event_id}` endpoint. A context step's `executed: false` simply means it is not a tool invocation.
+
+For the injection scenario, the timeline is:
+
+1. Trusted original support request.
+2. Untrusted support document claiming to override the task.
+3. Manipulated agent's dangerous proposal, intercepted by AgentGate: `BLOCK`, `80`, `CRITICAL`, `executed: false`, and both `bulk_sensitive_data_export` and `external_sensitive_data_transfer` policy matches.
+
+## Guarded execution architecture
+
+`SimulatedAgent → ToolRequest → GuardedExecutor → evaluate_and_record → existing engine → existing event store → decision → fake tool only for ALLOW`
+
+The agent receives only a guarded executor, not tool adapters. Both the standalone evaluation API and the simulation use the same evaluate-and-audit operation and server-owned permission configuration. Simulation-specific behavior stays outside the core engine. Each run creates fresh fake tools while sharing the application's existing audit store.
+
+The event is saved before inspecting the execution decision. BLOCK returns `BLOCKED`; REQUIRE_APPROVAL returns `PENDING_APPROVAL`; neither invokes the adapter. Audit-write failures also prevent execution. Normal workflows stop if the lookup cannot execute; they do not send a follow-up email. Scenario summaries reflect actual outcomes, with `STOPPED` available if the expected workflow cannot complete.
+
+Existing events describe security evaluations, not tool-completion receipts. Execution outcomes appear in the scenario timeline. Durable logs, actual human approval/resumption, and real tool adapters remain future work. The API metadata remains at version 0.2.0 to preserve the existing Milestone 2 contract.
