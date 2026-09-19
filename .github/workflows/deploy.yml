@@ -1,0 +1,76 @@
+name: Deploy AgentGate to Azure
+
+on:
+  workflow_run:
+    workflows: ["AgentGate CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to Azure Container Registry
+        run: az acr login --name agentgatehackathonrayhan
+
+      - name: Build and push production image
+        env:
+          IMAGE: agentgatehackathonrayhan.azurecr.io/agentgate:${{ github.event.workflow_run.head_sha }}
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --tag "$IMAGE" \
+            .
+          docker push "$IMAGE"
+
+      - name: Deploy tested image to Azure Container Apps
+        env:
+          IMAGE: agentgatehackathonrayhan.azurecr.io/agentgate:${{ github.event.workflow_run.head_sha }}
+        run: |
+          az containerapp update \
+            --name agentgate \
+            --resource-group agentgate-hackathon-rg \
+            --image "$IMAGE"
+
+      - name: Verify live deployment
+        run: |
+          FQDN=$(az containerapp show \
+            --name agentgate \
+            --resource-group agentgate-hackathon-rg \
+            --query properties.configuration.ingress.fqdn \
+            --output tsv)
+
+          echo "Checking https://$FQDN/api/health"
+
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error \
+              "https://$FQDN/api/health" | grep -q '"status":"ok"'; then
+              echo "AgentGate deployment is healthy."
+              exit 0
+            fi
+
+            echo "Waiting for deployment... ($attempt/12)"
+            sleep 10
+          done
+
+          echo "AgentGate failed its post-deployment health check."
+          exit 1
