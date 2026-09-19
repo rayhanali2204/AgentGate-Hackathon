@@ -2,7 +2,7 @@
 
 **Zero-Trust Security for Autonomous AI Agents**
 
-Every AI tool call is intercepted, evaluated and audited before execution. Milestone 4 adds a React + TypeScript dashboard to the existing Python engine, REST API, and deterministic agent simulations.
+Every AI tool call is intercepted, evaluated and audited before execution. Milestones 1–4 provide the Python engine, REST API, deterministic agent simulations, and React dashboard. Milestone 5 packages the application for a single-container, same-origin production setup.
 
 ## Local setup
 
@@ -32,13 +32,13 @@ npm run dev
 
 Open **http://localhost:5173**. Backend documentation: http://127.0.0.1:8000/docs.
 
-The frontend defaults to `http://127.0.0.1:8000`. To use another API address, create `frontend/.env.local` containing:
+During Vite development the frontend defaults to `http://127.0.0.1:8000`. Production builds default to same-origin API paths. To override the API address, create `frontend/.env.local` containing:
 
 ```env
 VITE_API_BASE_URL=http://127.0.0.1:8000
 ```
 
-Restart Vite after changing environment settings. This setting is public build-time configuration, not a place for secrets. The backend allows the exact browser origin `http://localhost:5173`; use that URL, not `http://127.0.0.1:5173`. Vite uses a strict port so it cannot silently switch to an origin rejected by CORS.
+An explicitly empty `VITE_API_BASE_URL` selects same-origin requests even in development. Restart Vite after changing environment settings. This setting is public build-time configuration, not a place for secrets. The backend allows the exact browser origin `http://localhost:5173`; use that URL, not `http://127.0.0.1:5173`. Vite uses a strict port so it cannot silently switch to an origin rejected by CORS.
 
 ## Run the demo
 
@@ -93,8 +93,75 @@ npm test
 npm run build
 ```
 
-`npm run preview` serves the production build at http://localhost:5173 while the backend is running. Stop the Vite development server before starting preview on the same port.
+`npm run preview` previews static frontend files only. Production builds use same-origin API requests, so use FastAPI static hosting or Docker below to verify the complete production application.
 
 Accessibility includes text/icon decision labels, semantic landmarks, labeled filters, keyboard-accessible event selection, visible focus states, error/loading announcements, and reduced-motion support. Typography uses system fonts with no external font requests.
 
-Milestone 4 only: no Docker, CI/CD, Azure, persistence, production tools, or real LLM integration.
+## Production: one same-origin container
+
+```text
+Browser → http://localhost:8000
+                     ↓
+                  FastAPI
+                  ├── /api/*       Existing AgentGate JSON API
+                  ├── /assets/*    Compiled React assets
+                  └── /*           React dashboard / UI route fallback
+```
+
+Production frontend requests use relative `/api/health`, `/api/events`, and `/api/scenarios` URLs. No localhost backend address is embedded in the default production build, and no cross-origin access is needed. Development retains the existing explicit CORS allowlist for `http://localhost:5173`; it is not widened.
+
+The root Dockerfile has two stages, following Docker's [multi-stage build approach](https://docs.docker.com/build/building/multi-stage/):
+
+1. `node:22-bookworm-slim`: copy npm manifests, run `npm ci`, copy frontend source, and run the TypeScript/Vite production build. The Docker stage forces an empty `VITE_API_BASE_URL`; local environment files are excluded from the build context.
+2. `python:3.12-slim-bookworm`: install only backend production dependencies from `pyproject.toml`, install the application, and copy only the compiled frontend output from stage 1. Dependencies are cached separately from application source. Node, frontend node_modules, local virtual environments, and tests are not copied into the runtime image.
+
+The runtime uses unprivileged UID/GID `10001`, listens on `0.0.0.0:8000`, and runs Uvicorn without reload. A Python-standard-library healthcheck checks `GET /api/health` every 30 seconds. No curl dependency or credentials are added. Keep one worker while audit storage is process-local and in-memory.
+
+Build and run from the repository root:
+
+```sh
+docker build -t agentgate:local .
+docker run --rm --name agentgate-local -p 127.0.0.1:8000:8000 agentgate:local
+```
+
+Stop any development backend already using port 8000 first. Open **http://localhost:8000**; the dashboard and API are now served by the same FastAPI process. The host port is bound to loopback for the local demo, while the process inside the container binds to all container interfaces.
+
+Check health and run all scenarios:
+
+```sh
+curl -fsS http://localhost:8000/api/health
+curl -fsS http://localhost:8000/api/scenarios
+curl -fsS -X POST http://localhost:8000/api/scenarios/normal-support/run
+curl -fsS -X POST http://localhost:8000/api/scenarios/prompt-injection/run
+curl -fsS -X POST http://localhost:8000/api/scenarios/destructive-approval/run
+curl -fsS http://localhost:8000/api/events
+```
+
+Expected results remain `SUCCESS` (two executed fake tools), `ATTACK_BLOCKED` (BLOCK / 80 / CRITICAL, executed=false), and `APPROVAL_REQUIRED` (REQUIRE_APPROVAL, executed=false).
+
+When finished, stop the container from another terminal; `--rm` removes it:
+
+```sh
+docker stop agentgate-local
+```
+
+The image structure and port 8000 are intended for Azure Container Apps, but this milestone does not configure or deploy Azure resources. If targeting an amd64 runtime from an ARM machine, use `docker build --platform linux/amd64 -t agentgate:local .`. Audit events remain ephemeral; container restart or scaling does not provide shared persistence.
+
+## Static hosting without Docker
+
+FastAPI mounts the frontend only if a directory containing `index.html` exists. The local default is `frontend/dist` resolved relative to the repository, not the working directory. Set `FRONTEND_DIST_PATH` to an absolute path to override it; Docker sets `/app/frontend/dist`. Missing builds leave the API usable and `/` returns 404.
+
+The static mount is registered after API routes. Unknown `/api` and `/api/*` paths remain JSON 404s, even for POST/PUT/DELETE. Existing files are served through Starlette's safe static-file handling. Only extensionless UI paths fall back to `index.html`; missing assets and private dot paths do not. The HTML entry point uses `Cache-Control: no-cache` to avoid a stale document referencing old assets. No frontend build is required for backend tests: static-serving tests create tiny temporary fixtures.
+
+To verify the production application locally without Docker:
+
+```sh
+npm --prefix frontend run build
+backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8001
+```
+
+Open http://localhost:8001. This serves the actual production frontend and API from one origin, but is **not** a Docker image or container verification.
+
+Milestone 5 verification in this environment: 173 backend tests and 13 frontend tests passed; TypeScript/Vite build passed. The compiled dashboard was served by FastAPI at http://localhost:8001 and all three scenarios were verified through that same-origin UI, including event-log updates. Docker CLI is unavailable, so the actual image build and container startup remain to be verified on a Docker-capable machine. No test containers were created or left running.
+
+No CI/CD, Azure deployment, persistence, production tools, or real LLM integration was added.

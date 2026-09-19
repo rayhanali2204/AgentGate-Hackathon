@@ -1,4 +1,4 @@
-# AgentGate — Milestone 3
+# AgentGate — Milestone 5
 
 AgentGate is a zero-trust runtime security gateway for autonomous AI agents. Milestones 1 and 2 provide the framework-independent security engine, FastAPI API, and in-memory security event log. Milestone 3 adds a deterministic autonomous-agent simulation demonstrating runtime enforcement. It evaluates proposed tool requests; callers must enforce the returned decision before executing a tool. The evaluation endpoint does not execute tools. Scenario runs execute only safe fake tools after ALLOW; an approval workflow is not implemented.
 
@@ -201,3 +201,9 @@ The agent receives only a guarded executor, not tool adapters. Both the standalo
 The event is saved before inspecting the execution decision. BLOCK returns `BLOCKED`; REQUIRE_APPROVAL returns `PENDING_APPROVAL`; neither invokes the adapter. Audit-write failures also prevent execution. Normal workflows stop if the lookup cannot execute; they do not send a follow-up email. Scenario summaries reflect actual outcomes, with `STOPPED` available if the expected workflow cannot complete.
 
 Existing events describe security evaluations, not tool-completion receipts. Execution outcomes appear in the scenario timeline. Durable logs, actual human approval/resumption, and real tool adapters remain future work. The API metadata remains at version 0.2.0 to preserve the existing Milestone 2 contract.
+
+## Production frontend hosting (Milestone 5)
+
+`app/static_frontend.py` optionally mounts the compiled React frontend after all API routes. The default directory is the repository's `frontend/dist`; `FRONTEND_DIST_PATH` overrides it, and tests can pass `create_app(frontend_dist=...)`. Missing frontend builds do not prevent API-only startup. API 404s stay JSON, missing assets stay 404, and extensionless UI paths fall back to `index.html`.
+
+The root Dockerfile builds the frontend with Node, then copies the compiled assets into a non-root Python runtime serving both UI and API on port 8000. See [the project README](../README.md) for Docker build/run commands and the distinction between separate Vite development and same-origin production. Core authorization policies and simulation behavior are unchanged.
