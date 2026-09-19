@@ -162,6 +162,16 @@ backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.
 
 Open http://localhost:8001. This serves the actual production frontend and API from one origin, but is **not** a Docker image or container verification.
 
-Milestone 5 verification in this environment: 173 backend tests and 13 frontend tests passed; TypeScript/Vite build passed. The compiled dashboard was served by FastAPI at http://localhost:8001 and all three scenarios were verified through that same-origin UI, including event-log updates. Docker CLI is unavailable, so the actual image build and container startup remain to be verified on a Docker-capable machine. No test containers were created or left running.
+Milestone 5 verification in this environment: 173 backend tests and 13 frontend tests passed; TypeScript/Vite build passed. The compiled dashboard was served by FastAPI at http://localhost:8001 and all three scenarios were verified through that same-origin UI, including event-log updates. The actual Docker image was subsequently built and verified healthy: same-origin dashboard/API, all three scenarios, audit events, and non-root execution passed. The temporary verification container was stopped and removed.
 
-No CI/CD, Azure deployment, persistence, production tools, or real LLM integration was added.
+## Continuous integration (Milestone 6)
+
+[AgentGate CI](.github/workflows/ci.yml) runs on pushes to `main` and pull requests targeting `main`, using Ubuntu 24.04 GitHub-hosted runners:
+
+- **Backend tests:** Python 3.12, install `./backend[test]`, then `python -m pytest -q backend/tests`.
+- **Frontend tests and production build:** Node.js 22, `npm ci`, `npm test`, then `npm run build` from `frontend/`. The build includes TypeScript checking.
+- **Production Docker image build:** after both validation jobs succeed, run `docker build --file Dockerfile --tag agentgate:ci .` against the root Dockerfile. The image stays on the temporary runner; it is not published.
+
+Python and Node match the production Docker stages. The setup actions cache pip/npm downloads using their dependency manifests. Workflow permissions are read-only, checkout credentials are not persisted, and no cloud secrets are required. This is CI only: no continuous deployment or Azure deployment is configured. The workflow must be committed/pushed before GitHub-hosted execution can be verified.
+
+No Azure deployment, persistence, production tools, or real LLM integration was added.
